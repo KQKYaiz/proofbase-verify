@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProofBase 独立验证</title>
+<style>
+  :root {
+    --ink: #111827; --muted: #667085; --line: #e4e7ec;
+    --navy: #172554; --green: #087443; --red: #b42318; --bg: #f5f6f8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+  header h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
+  header p { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .drop {
+    border: 1.5px dashed #cbd2e0; border-radius: 12px; padding: 28px 16px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: .15s;
+    background: #fafbfc;
+  }
+  .drop:hover, .drop.over { border-color: var(--navy); color: var(--navy); background: #f0f3fa; }
+  .drop strong { color: var(--ink); }
+  .meta { display: grid; grid-template-columns: 120px 1fr; gap: 6px 14px; font-size: 13px; margin-top: 4px; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; font-weight: 700; }
+  .badge.ok { background: #e7f6ee; color: var(--green); }
+  .badge.bad { background: #fdeceb; color: var(--red); }
+  .badge.wait { background: #eef1f5; color: var(--muted); }
+  .row { border-top: 1px solid #f2f4f7; padding: 14px 0 4px; }
+  .row:first-child { border-top: 0; }
+  .row .file { font-weight: 700; word-break: break-all; }
+  .row .detail { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-all; }
+  a { color: var(--navy); }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: #f4f5f7; padding: 1px 5px; border-radius: 4px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ProofBase 独立验证</h1>
+    <p>把凭证 JSON 和原文件拖进来，本地校验 SHA-256 与 Merkle Proof，并从公共 RPC 直接读取链上状态。不经过任何后端服务器。</p>
+  </header>
+
+  <section class="card">
+    <h2>1. 凭证 JSON</h2>
+    <div class="drop" id="jsonDrop"><strong>点击选择</strong> 或拖入 <code>proofbase-*.json</code></div>
+    <input type="file" id="jsonInput" accept=".json,application/json" hidden>
+    <div id="credSummary" class="hidden">
+      <dl class="meta" id="credMeta"></dl>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>2. 待验证文件（可多选）</h2>
+    <div class="drop" id="fileDrop"><strong>点击选择</strong> 或拖入文件</div>
+    <input type="file" id="fileInput" multiple hidden>
+    <p class="hint">不选文件也可以：只检查这份凭证本身是否已在链上锚定。</p>
+  </section>
+
+  <section class="card">
+    <h2>验证结果</h2>
+    <div id="results"><p class="hint">等待凭证…</p></div>
+  </section>
+</div>
+
+<script>
+// ── 常量 ────────────────────────────────────────────────────────────────
+const RPC = {
+  11155111: ['https://ethereum-sepolia-rpc.publicnode.com', 'https://sepolia.gateway.tenderly.co', 'https://rpc.sepolia.org'],
+  97: ['https://bsc-testnet-rpc.publicnode.com', 'https://data-seed-prebsc-1-s1.bnbchain.org:8545'],
+  56: ['https://bsc-rpc.publicnode.com'],
+  1: ['https://ethereum-rpc.publicnode.com'],
+  8453: ['https://base-rpc.publicnode.com']
+};
+const SEL_ANCHORED = '0xce993b8c'; // anchoredRoots(bytes32)
+const TOPIC_BATCH = '0xd194f2d10de9bc0cf2dea5623d1ce3d4e6afe0eef265b47997b26e50ba9ccc7b'; // BatchAnchored(...)
+
+// ── 工具函数 ────────────────────────────────────────────────────────────
+const bytesToHex = (b) => Array.from(b).map((x) => x.toString(16).padStart(2, '0')).join('');
+const hexToBytes = (h) => {
+  const clean = String(h).replace(/^0x/i, '');
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  return out;
+};
+const norm = (h) => String(h || '').replace(/^0x/i, '').toLowerCase();
+
+async function sha256Bytes(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+// 与合约 verifyLeaf 一致：左右按字节序（等价于小写十六进制字典序）排序后拼接再哈希
+async function hashPair(a, b) {
+  const left = a < b ? a : b;
+  const right = a < b ? b : a;
+  const buf = new Uint8Array(64);
+  buf.set(hexToBytes(left), 0);
+  buf.set(hexToBytes(right), 32);
+  return sha256Bytes(buf);
+}
+
+async function rootFromProof(leafHex, proof) {
+  let cur = norm(leafHex);
+  for (const node of proof || []) cur = await hashPair(cur, norm(node));
+  return cur;
+}
+
+// ── RPC ────────────────────────────────────────────────────────────────
+async function jsonRpc(chainId, method, params) {
+  const urls = RPC[Number(chainId)] || [];
+  if (!urls.length) throw new Error('未配置 chainId ' + chainId + ' 的公共 RPC');
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error.message || 'RPC error');
+      return json.result;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError || new Error('所有 RPC 均不可用');
+}
+
+async function isAnchored(chainId, contract, root) {
+  const data = SEL_ANCHORED + norm(root).padStart(64, '0');
+  const result = await jsonRpc(chainId, 'eth_call', [{ to: contract, data }, 'latest']);
+  if (!result || result === '0x') return false;
+  return BigInt(result) === 1n;
+}
+
+// ── 状态 ────────────────────────────────────────────────────────────────
+let credential = null;
+let anchoredState = { status: 'wait' };
+
+// ── 渲染 ────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const badge = (cls, text) => '<span class="badge ' + cls + '">' + text + '</span>';
+
+function renderCredential() {
+  const c = credential;
+  if (!c) return;
+  const rows = [
+    ['网络', (c.network?.name || '-') + (c.network?.chainId ? ' (chainId ' + c.network.chainId + ')' : '')],
+    ['合约', c.contract ? '<a href="' + (c.network?.explorer || '') + '/address/' + c.contract + '" target="_blank" rel="noreferrer">' + c.contract + '</a>' : '-'],
+    ['Merkle Root', c.batch?.merkleRoot || '-'],
+    ['文件数量', c.batch?.itemCount ?? '-'],
+    ['交易', c.transaction?.hash ? '<a href="' + (c.transaction?.explorerUrl || '') + '" target="_blank" rel="noreferrer">' + c.transaction.hash + '</a>' : '-'],
+    ['区块', c.transaction?.blockNumber ?? '-'],
+    ['链上时间', c.transaction?.blockTimestamp ? new Date(c.transaction.blockTimestamp).toLocaleString('zh-CN') : '-'],
+    ['凭证生成时间', c.createdAt ? new Date(c.createdAt).toLocaleString('zh-CN') : '-'],
+    ['链上状态', '<span id="anchorBadge">' + badge('wait', '检查中…') + '</span>']
+  ];
+  $('credMeta').innerHTML = rows.map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('');
+  $('credSummary').classList.remove('hidden');
+}
+
+function setAnchorBadge() {
+  const el = $('anchorBadge');
+  if (!el) return;
+  if (anchoredState.status === 'ok') el.innerHTML = badge('ok', '✓ 已在链上锚定');
+  else if (anchoredState.status === 'no') el.innerHTML = badge('bad', '✗ 链上未找到该 Root');
+  else if (anchoredState.status === 'error') el.innerHTML = badge('wait', '查询失败：' + anchoredState.error);
+  else el.innerHTML = badge('wait', '检查中…');
+}
+
+// ── 凭证加载 ────────────────────────────────────────────────────────────
+async function loadCredential(file) {
+  $('results').innerHTML = '<p class="hint">正在解析凭证…</p>';
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    if (!parsed?.batch?.merkleRoot || !Array.isArray(parsed?.files)) {
+      throw new Error('不是有效的 ProofBase 凭证文件');
+    }
+    credential = parsed;
+    anchoredState = { status: 'wait' };
+    renderCredential();
+    await checkChain();
+    renderResults([]);
+  } catch (e) {
+    credential = null;
+    $('credSummary').classList.add('hidden');
+    $('results').innerHTML = '<p><span class="badge bad">凭证无效</span> ' + (e.message || e) + '</p>';
+  }
+}
+
+async function checkChain() {
+  const c = credential;
+  const chainId = c?.network?.chainId;
+  const contract = c?.contract;
+  const root = c?.batch?.merkleRoot;
+  if (!chainId || !contract || !root) {
+    anchoredState = { status: 'error', error: '凭证缺少网络/合约地址' };
+    setAnchorBadge();
+    return;
+  }
+  try {
+    const anchored = await isAnchored(chainId, contract, root);
+    anchoredState = { status: anchored ? 'ok' : 'no' };
+    setAnchorBadge();
+    if (anchored && c.transaction?.hash) await verifyTransaction();
+  } catch (e) {
+    anchoredState = { status: 'error', error: e.message || 'RPC 不可用' };
+    setAnchorBadge();
+  }
+}
+
+// 校验交易确实调用了该合约并发出匹配 Merkle Root 的 BatchAnchored 事件
+async function verifyTransaction() {
+  const c = credential;
+  try {
+    const receipt = await jsonRpc(c.network.chainId, 'eth_getTransactionReceipt', [c.transaction.hash]);
+    if (!receipt) { c._txCheck = { ok: false, reason: '交易不存在（可能还在等待确认）' }; return; }
+    const statusOk = receipt.status === '0x1';
+    const toOk = norm(receipt.to) === norm(c.contract);
+    const eventOk = (receipt.logs || []).some((log) =>
+      norm(log.address) === norm(c.contract) &&
+      norm(log.topics?.[0]) === norm(TOPIC_BATCH) &&
+      norm(log.topics?.[2]) === norm(c.batch.merkleRoot)
+    );
+    c._txCheck = { ok: statusOk && toOk && eventOk, reason: [statusOk ? '交易成功' : '交易失败', toOk ? '合约匹配' : '合约不匹配', eventOk ? '事件 Root 匹配' : '事件 Root 不匹配'].join(' · ') };
+  } catch (e) {
+    c._txCheck = { ok: false, reason: '读取交易失败：' + (e.message || e) };
+  }
+}
+
+// ── 文件验证 ────────────────────────────────────────────────────────────
+async function verifyFiles(files) {
+  if (!credential) { $('results').innerHTML = '<p class="hint">请先选择凭证 JSON。</p>'; return; }
+  const list = [];
+  for (const file of files) {
+    try {
+      const buffer = await file.arrayBuffer();
+      const digest = await sha256Bytes(new Uint8Array(buffer));
+      const entry = credential.files.find((f) => norm(f.sha256) === digest);
+      if (!entry) {
+        list.push({ name: file.name, ok: false, detail: '凭证中没有与该文件匹配的 SHA-256（文件已被修改或不属于该批次）' });
+        continue;
+      }
+      const root = await rootFromProof(digest, entry.merkleProof);
+      const rootOk = norm(root) === norm(credential.batch.merkleRoot);
+      list.push({
+        name: file.name,
+        ok: rootOk,
+        detail: rootOk
+          ? 'SHA-256 一致 · Merkle Proof 还原 Root 成功 · 对应凭证中的「' + (entry.name || '未命名') + '」'
+          : 'SHA-256 一致，但 Merkle Proof 无法还原到凭证中的 Root（凭证可能被改过）'
+      });
+    } catch (e) {
+      list.push({ name: file.name, ok: false, detail: '读取失败：' + (e.message || e) });
+    }
+  }
+  renderResults(list);
+}
+
+function renderResults(list) {
+  const c = credential;
+  const chainLine = c
+    ? (anchoredState.status === 'ok'
+        ? badge('ok', '✓ 凭证已在链上锚定') + (c._txCheck ? ' <span style="color:#667085;font-size:12px">（' + c._txCheck.reason + '）</span>' : '')
+        : anchoredState.status === 'no'
+          ? badge('bad', '✗ 链上未找到该 Root')
+          : badge('wait', '链上状态：' + (anchoredState.error || '查询中')))
+    : '';
+
+  const rows = list.map((r) => (
+    '<div class="row">' +
+      '<div class="file">' + (r.ok ? badge('ok', '✓ 未篡改') : badge('bad', '✗ 不通过')) + ' ' + escapeHtml(r.name) + '</div>' +
+      '<div class="detail">' + escapeHtml(r.detail) + '</div>' +
+    '</div>'
+  )).join('');
+
+  $('results').innerHTML =
+    (chainLine ? '<p style="margin:0 0 10px">' + chainLine + '</p>' : '') +
+    (rows || '<p class="hint">选择文件后会在这里显示每份文件的验证结果。</p>');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+// ── 交互绑定 ────────────────────────────────────────────────────────────
+function bindDrop(dropEl, inputEl, onFiles) {
+  dropEl.addEventListener('click', () => inputEl.click());
+  inputEl.addEventListener('change', () => {
+    if (inputEl.files?.length) onFiles(Array.from(inputEl.files));
+  });
+  ['dragenter', 'dragover'].forEach((ev) => dropEl.addEventListener(ev, (e) => {
+    e.preventDefault(); dropEl.classList.add('over');
+  }));
+  ['dragleave', 'drop'].forEach((ev) => dropEl.addEventListener(ev, (e) => {
+    e.preventDefault(); dropEl.classList.remove('over');
+  }));
+  dropEl.addEventListener('drop', (e) => {
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length) onFiles(files);
+  });
+}
+
+bindDrop($('jsonDrop'), $('jsonInput'), (files) => loadCredential(files[0]));
+bindDrop($('fileDrop'), $('fileInput'), (files) => verifyFiles(files));
+</script>
+</body>
+</html>
