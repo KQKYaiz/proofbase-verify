@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ProofBase 独立验证</title>
 <style>
   :root {
@@ -13,8 +13,9 @@
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding-bottom: calc(84px + env(safe-area-inset-bottom));
   }
-  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 24px; }
   header h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
   header p { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
   .card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
@@ -40,7 +41,34 @@
   a { color: var(--navy); }
   code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: #f4f5f7; padding: 1px 5px; border-radius: 4px; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 10px; }
-  .hidden { display: none; }
+  .hidden { display: none !important; }
+  .ghost {
+    display: inline-block; margin-top: 12px; padding: 10px 14px; border-radius: 10px;
+    border: 1px solid var(--line); background: #fff; color: var(--navy);
+    font: inherit; font-size: 13px; font-weight: 700; cursor: pointer;
+  }
+  .ghost:hover { background: #f5f7fb; }
+
+  /* ── 底部 dock ── */
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    display: flex; gap: 4px; padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    background: rgba(255,255,255,.94); backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px); border-top: 1px solid var(--line);
+  }
+  .dock-item {
+    flex: 1; border: 0; background: none; font: inherit; color: var(--muted);
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 6px 0; border-radius: 10px; cursor: pointer; font-size: 11px;
+  }
+  .dock-item:hover { background: #f5f7fb; }
+  .dock-item.active { color: var(--navy); font-weight: 800; }
+  .dock-item svg { width: 22px; height: 22px; }
+  .dot {
+    position: absolute; transform: translate(16px, -2px);
+    width: 7px; height: 7px; border-radius: 50%; background: var(--red);
+  }
+  .dock-item { position: relative; }
 </style>
 </head>
 <body>
@@ -50,27 +78,50 @@
     <p>把凭证 JSON 和原文件拖进来，本地校验 SHA-256 与 Merkle Proof，并从公共 RPC 直接读取链上状态。不经过任何后端服务器。</p>
   </header>
 
-  <section class="card">
-    <h2>1. 凭证 JSON</h2>
-    <div class="drop" id="jsonDrop"><strong>点击选择</strong> 或拖入 <code>proofbase-*.json</code></div>
-    <input type="file" id="jsonInput" accept=".json,application/json" hidden>
-    <div id="credSummary" class="hidden">
-      <dl class="meta" id="credMeta"></dl>
-    </div>
+  <!-- ── 上传 ── -->
+  <section id="tab-upload">
+    <section class="card">
+      <h2>1. 凭证 JSON</h2>
+      <div class="drop" id="jsonDrop"><strong>点击选择</strong> 或拖入 <code>proofbase-*.json</code></div>
+      <input type="file" id="jsonInput" accept=".json,application/json" hidden>
+      <div id="credSummary" class="hidden">
+        <dl class="meta" id="credMeta"></dl>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2. 待验证文件（可多选）</h2>
+      <div class="drop" id="fileDrop"><strong>点击选择</strong> 或拖入文件</div>
+      <input type="file" id="fileInput" multiple hidden>
+      <p class="hint">不选文件也可以：切到「验证」页只检查这份凭证本身是否已在链上锚定。</p>
+    </section>
   </section>
 
-  <section class="card">
-    <h2>2. 待验证文件（可多选）</h2>
-    <div class="drop" id="fileDrop"><strong>点击选择</strong> 或拖入文件</div>
-    <input type="file" id="fileInput" multiple hidden>
-    <p class="hint">不选文件也可以：只检查这份凭证本身是否已在链上锚定。</p>
-  </section>
-
-  <section class="card">
-    <h2>验证结果</h2>
-    <div id="results"><p class="hint">等待凭证…</p></div>
+  <!-- ── 验证 ── -->
+  <section id="tab-verify" class="hidden">
+    <section class="card">
+      <h2>验证结果</h2>
+      <div id="results"><p class="hint">还没有凭证。先去「上传」页添加。</p></div>
+      <button class="ghost" id="goUpload">＋ 添加要验证的文件</button>
+    </section>
   </section>
 </div>
+
+<nav class="dock">
+  <button class="dock-item active" id="dockUpload" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+    </svg>
+    <span>上传</span>
+  </button>
+  <button class="dock-item" id="dockVerify" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3 4 6v6c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V6l-8-3Z"/><path d="m9 12 2 2 4-4"/>
+    </svg>
+    <span>验证</span>
+    <i class="dot hidden" id="verifyDot"></i>
+  </button>
+</nav>
 
 <script>
 // ── 常量 ────────────────────────────────────────────────────────────────
@@ -149,8 +200,21 @@ async function isAnchored(chainId, contract, root) {
 let credential = null;
 let anchoredState = { status: 'wait' };
 
-// ── 渲染 ────────────────────────────────────────────────────────────────
+// ── DOM / 标签切换 ──────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
+const dot = () => $('verifyDot');
+
+function switchTab(name) {
+  const isUpload = name === 'upload';
+  $('tab-upload').classList.toggle('hidden', !isUpload);
+  $('tab-verify').classList.toggle('hidden', isUpload);
+  $('dockUpload').classList.toggle('active', isUpload);
+  $('dockVerify').classList.toggle('active', !isUpload);
+  if (!isUpload) dot().classList.add('hidden');
+  window.scrollTo({ top: 0, behavior: 'instant' });
+}
+
+// ── 渲染 ────────────────────────────────────────────────────────────────
 const badge = (cls, text) => '<span class="badge ' + cls + '">' + text + '</span>';
 
 function renderCredential() {
@@ -182,7 +246,7 @@ function setAnchorBadge() {
 
 // ── 凭证加载 ────────────────────────────────────────────────────────────
 async function loadCredential(file) {
-  $('results').innerHTML = '<p class="hint">正在解析凭证…</p>';
+  dot().classList.add('hidden');
   try {
     const text = await file.text();
     const parsed = JSON.parse(text);
@@ -192,12 +256,14 @@ async function loadCredential(file) {
     credential = parsed;
     anchoredState = { status: 'wait' };
     renderCredential();
+    renderResults([]);
     await checkChain();
     renderResults([]);
   } catch (e) {
     credential = null;
     $('credSummary').classList.add('hidden');
-    $('results').innerHTML = '<p><span class="badge bad">凭证无效</span> ' + (e.message || e) + '</p>';
+    $('results').innerHTML = '<p><span class="badge bad">凭证无效</span> ' + escapeHtml(e.message || String(e)) + '</p>';
+    dot().classList.add('hidden');
   }
 }
 
@@ -235,7 +301,10 @@ async function verifyTransaction() {
       norm(log.topics?.[0]) === norm(TOPIC_BATCH) &&
       norm(log.topics?.[2]) === norm(c.batch.merkleRoot)
     );
-    c._txCheck = { ok: statusOk && toOk && eventOk, reason: [statusOk ? '交易成功' : '交易失败', toOk ? '合约匹配' : '合约不匹配', eventOk ? '事件 Root 匹配' : '事件 Root 不匹配'].join(' · ') };
+    c._txCheck = {
+      ok: statusOk && toOk && eventOk,
+      reason: [statusOk ? '交易成功' : '交易失败', toOk ? '合约匹配' : '合约不匹配', eventOk ? '事件 Root 匹配' : '事件 Root 不匹配'].join(' · ')
+    };
   } catch (e) {
     c._txCheck = { ok: false, reason: '读取交易失败：' + (e.message || e) };
   }
@@ -243,7 +312,11 @@ async function verifyTransaction() {
 
 // ── 文件验证 ────────────────────────────────────────────────────────────
 async function verifyFiles(files) {
-  if (!credential) { $('results').innerHTML = '<p class="hint">请先选择凭证 JSON。</p>'; return; }
+  if (!credential) {
+    $('results').innerHTML = '<p class="hint">请先在「上传」页选择凭证 JSON。</p>';
+    switchTab('verify');
+    return;
+  }
   const list = [];
   for (const file of files) {
     try {
@@ -268,16 +341,17 @@ async function verifyFiles(files) {
     }
   }
   renderResults(list);
+  switchTab('verify');
 }
 
 function renderResults(list) {
   const c = credential;
   const chainLine = c
     ? (anchoredState.status === 'ok'
-        ? badge('ok', '✓ 凭证已在链上锚定') + (c._txCheck ? ' <span style="color:#667085;font-size:12px">（' + c._txCheck.reason + '）</span>' : '')
+        ? badge('ok', '✓ 凭证已在链上锚定') + (c._txCheck ? ' <span style="color:#667085;font-size:12px">（' + escapeHtml(c._txCheck.reason) + '）</span>' : '')
         : anchoredState.status === 'no'
           ? badge('bad', '✗ 链上未找到该 Root')
-          : badge('wait', '链上状态：' + (anchoredState.error || '查询中')))
+          : badge('wait', '链上状态：' + escapeHtml(anchoredState.error || '查询中')))
     : '';
 
   const rows = list.map((r) => (
@@ -289,7 +363,9 @@ function renderResults(list) {
 
   $('results').innerHTML =
     (chainLine ? '<p style="margin:0 0 10px">' + chainLine + '</p>' : '') +
-    (rows || '<p class="hint">选择文件后会在这里显示每份文件的验证结果。</p>');
+    (rows || '<p class="hint">' + (credential ? '凭证已载入。切换到「上传」页添加文件，或点下面的按钮。' : '还没有凭证。先去「上传」页添加。') + '</p>');
+
+  if (credential) dot().classList.add('hidden');
 }
 
 function escapeHtml(s) {
@@ -316,6 +392,13 @@ function bindDrop(dropEl, inputEl, onFiles) {
 
 bindDrop($('jsonDrop'), $('jsonInput'), (files) => loadCredential(files[0]));
 bindDrop($('fileDrop'), $('fileInput'), (files) => verifyFiles(files));
+
+$('dockUpload').addEventListener('click', () => switchTab('upload'));
+$('dockVerify').addEventListener('click', () => switchTab('verify'));
+$('goUpload').addEventListener('click', () => {
+  switchTab('upload');
+  $('fileInput').click();
+});
 </script>
 </body>
 </html>
